@@ -518,6 +518,67 @@ def get_due_date(page):
         log(f"❌ 获取Due Date失败: {e}")
     return "未知"
 
+def _dismiss_cookie_banner(page):
+    """
+    关掉 ncmp（Cookie 同意横幅）。它会盖在页面按钮上方拦截点击，
+    但不是每次都出现，也不是每个账号的浏览器状态都会弹出来。
+    优先点"同意/接受"类按钮；找不到就直接把横幅从 DOM 里移除兜底。
+    """
+    try:
+        for sel in ['#ncmp__tool button:has-text("Accept")',
+                    '#ncmp__tool button:has-text("同意")',
+                    '#ncmp__tool button:has-text("AGREE")',
+                    '#ncmp__tool button:has-text("Allow")',
+                    '#ncmp__tool button']:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click(timeout=2000)
+                    log("🍪 已关闭 Cookie 同意横幅")
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # 兜底：找不到按钮或点击失败，直接从 DOM 移除，避免它继续挡住点击
+    try:
+        removed = page.evaluate(
+            "() => { const el = document.getElementById('ncmp__tool'); "
+            "if (el) { el.remove(); return true; } return false; }"
+        )
+        if removed:
+            log("🍪 Cookie 横幅未能正常点击，已直接移除挡路元素")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _click_bypass_overlay(page, locator, timeout=8000):
+    """
+    点击元素；若被其它元素（如 Cookie 横幅）挡住导致常规点击超时，
+    先尝试关闭横幅重试一次，仍不行则用 JS 直接触发 click 事件兜底。
+    """
+    try:
+        locator.click(timeout=timeout)
+        return True
+    except Exception as e:
+        log(f"⚠️ 常规点击受阻（可能被遮挡），尝试处理遮挡层: {e}")
+        _dismiss_cookie_banner(page)
+        try:
+            locator.click(timeout=timeout)
+            return True
+        except Exception:
+            try:
+                locator.evaluate("el => el.click()")
+                log("🖱️ 已用 JS 方式直接点击（绕过遮挡检测）")
+                return True
+            except Exception as e2:
+                log(f"❌ JS 兜底点击也失败: {e2}")
+                return False
+
+
 def renew_service(page):
 
     try:
@@ -525,6 +586,7 @@ def renew_service(page):
         if page.url != SERVICE_URL:
             page.goto(SERVICE_URL, wait_until="domcontentloaded", timeout=60000)
         handle_cloudflare(page)
+        _dismiss_cookie_banner(page)
 
         log("🖱️ 准备点击 Renew 按钮...")
         time.sleep(3)
@@ -541,7 +603,8 @@ def renew_service(page):
                 renew_btn.wait_for(state="visible", timeout=10000)
                 renew_btn.scroll_into_view_if_needed()
                 log(f"🖱️ 第 {i+1} 次尝试点击 'Renew'...")
-                renew_btn.click()
+                if not _click_bypass_overlay(page, renew_btn):
+                    raise Exception("Renew 按钮点击失败")
                 time.sleep(2)
 
                 page_text = page.locator("body").inner_text()
@@ -578,7 +641,8 @@ def renew_service(page):
             log(f"🖱️ 点击 'Create Invoice'（第 {attempt + 1} 次）...")
             try:
                 create_btn.wait_for(state="visible", timeout=20000)
-                create_btn.click(timeout=20000)
+                if not _click_bypass_overlay(page, create_btn, timeout=20000):
+                    raise Exception("Create Invoice 点击失败（含遮挡兜底）")
             except Exception as e:
                 log(f"⚠️ 点击 Create Invoice 失败: {e}")
                 solve_modal_turnstile(page, timeout=45)
@@ -610,9 +674,11 @@ def renew_service(page):
         handle_cloudflare(page)
 
         log("🔎 查找 Pay 按钮...")
+        _dismiss_cookie_banner(page)
         pay_btn = page.locator('a:has-text("Pay"):visible, button:has-text("Pay"):visible').first
         pay_btn.wait_for(state="visible", timeout=30000)
-        pay_btn.click()
+        if not _click_bypass_overlay(page, pay_btn, timeout=15000):
+            raise Exception("Pay 按钮点击失败（含遮挡兜底）")
         log("✅ Pay 按钮已点击")
 
         time.sleep(5)
