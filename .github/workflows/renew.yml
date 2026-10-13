@@ -51,6 +51,92 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u app.py
 
+      # app.py 每次运行结束（不管续期成功、失败还是未到期）都会把当前已知的
+      # 到期时间写入 due_date.txt（YYYY-MM-DD），这里读出来算下一次运行时间：
+      # 正常情况下定在到期前 20 小时；如果因为某种原因剩余时间已经不足 20 小时，
+      # 就 4 小时后重试，避免错过续期窗口。
+      - name: 📅 提取到期时间
+        id: extract_due
+        if: always()
+        run: |
+          if [ -f "due_date.txt" ]; then
+            DUE_DATE=$(cat due_date.txt | tr -d '[:space:]')
+            echo "[INFO] 从 due_date.txt 读取到期时间: $DUE_DATE"
+          else
+            DUE_DATE=""
+            echo "[INFO] 未找到 due_date.txt（脚本可能在拿到到期时间前就失败了），跳过 Cron 更新"
+          fi
+
+          if [ -z "$DUE_DATE" ] || ! date -d "$DUE_DATE" > /dev/null 2>&1; then
+            echo "skip_update=true" >> $GITHUB_OUTPUT
+            [ -n "$DUE_DATE" ] && echo "::warning::到期时间格式无效: $DUE_DATE，跳过 Cron 更新"
+            exit 0
+          fi
+
+          echo "due_date=$DUE_DATE" >> $GITHUB_OUTPUT
+          echo "skip_update=false" >> $GITHUB_OUTPUT
+          echo "::notice::📅 当前到期时间: $DUE_DATE"
+
+      - name: 🔄 自动更新下次运行 Cron
+        if: steps.extract_due.outputs.skip_update == 'false'
+        run: |
+          set -e
+
+          DUE_DATE="${{ steps.extract_due.outputs.due_date }}"
+          echo "📅 当前到期时间: $DUE_DATE"
+
+          CURRENT_EPOCH=$(date -u +%s)
+          DUE_EPOCH=$(date -u -d "$DUE_DATE 00:00:00" +%s)
+          REMAINING_SECONDS=$((DUE_EPOCH - CURRENT_EPOCH))
+          REMAINING_HOURS_INT=$((REMAINING_SECONDS / 3600))
+
+          if [ "$REMAINING_HOURS_INT" -gt 20 ]; then
+            HOURS_UNTIL_NEXT_RUN=$((REMAINING_HOURS_INT - 20))
+          else
+            HOURS_UNTIL_NEXT_RUN=4
+            echo "::warning::剩余时间不足 20 小时，4 小时后重试"
+          fi
+
+          NEXT_DATE=$(date -u -d "+${HOURS_UNTIL_NEXT_RUN} hours" +"%Y-%m-%d %H:%M")
+          NEXT_MINUTE=$(date -u -d "+${HOURS_UNTIL_NEXT_RUN} hours" +"%-M")
+          NEXT_HOUR=$(date -u -d "+${HOURS_UNTIL_NEXT_RUN} hours" +"%-H")
+          NEXT_DAY=$(date -u -d "+${HOURS_UNTIL_NEXT_RUN} hours" +"%-d")
+          NEXT_MONTH=$(date -u -d "+${HOURS_UNTIL_NEXT_RUN} hours" +"%-m")
+
+          NEW_CRON="$NEXT_MINUTE $NEXT_HOUR $NEXT_DAY $NEXT_MONTH *"
+
+          echo "::notice::⏰ 下次运行: $NEXT_DATE UTC"
+          echo "::notice::📟 新 Cron: $NEW_CRON"
+
+          WORKFLOW_FILE=".github/workflows/renew-hidencloud.yml"
+          if [ ! -f "$WORKFLOW_FILE" ]; then
+            echo "::error::找不到工作流文件 $WORKFLOW_FILE，请确认实际文件名并修改本步骤里的路径"
+            exit 1
+          fi
+
+          LINE_NUM=$(grep -n "cron: '" "$WORKFLOW_FILE" | head -n1 | cut -d: -f1)
+          if [ -z "$LINE_NUM" ]; then
+            echo "::error::找不到 cron 行"
+            exit 1
+          fi
+
+          echo "::notice::更新第 $LINE_NUM 行"
+          sed -i "${LINE_NUM}c\\    - cron: '$NEW_CRON' # 根据到期时间自动更新下次运行时间" "$WORKFLOW_FILE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$WORKFLOW_FILE"
+          if git diff --cached --quiet; then
+            echo "::notice::没有变化需要提交"
+          else
+            git commit -m "🔄 自动更新续期 Cron" \
+                       -m "下次运行: $NEXT_DATE UTC" \
+                       -m "Cron: $NEW_CRON" \
+                       -m "到期时间: $DUE_DATE"
+            git push origin main
+            echo "::notice::✅ Cron 更新成功"
+          fi
+
       # 脚本把截图直接存在当前工作目录（renew_attempt_*.png、*_failed.png、
       # login_fail.png、security_timeout.png 等），不管这次成功还是失败都收集起来，
       # 没有的话 glob 不报错，方便下次失败时直接下载查看现场
