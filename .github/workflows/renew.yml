@@ -108,7 +108,7 @@ jobs:
           echo "::notice::⏰ 下次运行: $NEXT_DATE UTC"
           echo "::notice::📟 新 Cron: $NEW_CRON"
 
-          WORKFLOW_FILE=".github/workflows/renew-hidencloud.yml"
+          WORKFLOW_FILE=".github/workflows/renew.yml"
           if [ ! -f "$WORKFLOW_FILE" ]; then
             echo "::error::找不到工作流文件 $WORKFLOW_FILE，请确认实际文件名并修改本步骤里的路径"
             exit 1
