@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os,re,sys,time,random,requests
+from datetime import datetime
 try:
     from patchright.sync_api import sync_playwright
     USING_PATCHRIGHT = True
@@ -518,6 +519,22 @@ def get_due_date(page):
         log(f"❌ 获取Due Date失败: {e}")
     return "未知"
 
+def write_due_date_file(due_date_str):
+    """
+    把 '20 Oct 2026' 这种格式转成 'YYYY-MM-DD' 写入 due_date.txt，
+    供工作流读取后自动计算/更新下一次续期的 cron 时间（到期前一天触发）。
+    解析失败就不写文件，工作流那边会跳过本次 cron 更新。
+    """
+    try:
+        dt = datetime.strptime(due_date_str.strip(), "%d %b %Y")
+        with open("due_date.txt", "w") as f:
+            f.write(dt.strftime("%Y-%m-%d"))
+        log(f"📝 已写入 due_date.txt: {dt.strftime('%Y-%m-%d')}")
+        return True
+    except Exception as e:
+        log(f"⚠️ 到期时间格式无法解析（{due_date_str}），跳过写入 due_date.txt: {e}")
+        return False
+
 def _dismiss_cookie_banner(page):
     """
     关掉 ncmp（Cookie 同意横幅）。它会盖在页面按钮上方拦截点击，
@@ -739,6 +756,10 @@ def main():
                 new_due = get_due_date(page)
                 log(f"📆 续费后到期时间：{new_due}")
                 status = "✅ 续期成功"
+
+            # 无论本次续期成功/失败/未到时间，都把当前已知的到期时间写入文件，
+            # 工作流会据此自动算出"到期前一天"作为下次运行的 cron 时间
+            write_due_date_file(new_due)
 
             send_telegram_notification(status, old_due, new_due, current_ip)
 
